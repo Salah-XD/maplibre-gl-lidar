@@ -1,4 +1,4 @@
-import { Copc, Hierarchy } from 'copc';
+import { Copc, Hierarchy, Getter } from 'copc';
 import type { Copc as CopcType } from 'copc';
 import { createLazPerf, type LazPerf } from 'laz-perf';
 import proj4 from 'proj4';
@@ -13,6 +13,24 @@ import type {
 } from './streaming-types';
 import type { PointCloudData, ExtraPointAttributes, AttributeArray } from './types';
 import type { PointCloudBounds } from '../core/types';
+
+/**
+ * Source type for streaming loader - can be URL, File, or ArrayBuffer
+ */
+export type StreamingSource = string | File | ArrayBuffer;
+
+/**
+ * Creates a getter function from an ArrayBuffer for copc.js
+ * Uses subarray for better performance (no copy, just a view)
+ */
+function createBufferGetter(buffer: ArrayBuffer): Getter {
+  const uint8 = new Uint8Array(buffer);
+  return async (begin: number, end: number): Promise<Uint8Array> => {
+    // Use subarray for performance - creates a view without copying
+    // Then create a copy since copc.js might modify the data
+    return new Uint8Array(uint8.subarray(begin, end));
+  };
+}
 
 /**
  * Configuration for attribute storage types
@@ -159,9 +177,11 @@ const DEFAULT_OPTIONS: Required<StreamingLoaderOptions> = {
 /**
  * Streams COPC point cloud data on-demand based on viewport.
  * Implements center-first priority loading and respects point budget.
+ * Supports both URL and local file (File/ArrayBuffer) sources.
  */
 export class CopcStreamingLoader {
-  private _url: string;
+  private _originalSource: StreamingSource;
+  private _source: string | Getter | null = null; // URL string or Getter for buffer
   private _copc: CopcType | null = null;
   private _lazPerf: LazPerf | null = null;
   private _options: Required<StreamingLoaderOptions>;
@@ -216,11 +236,11 @@ export class CopcStreamingLoader {
   /**
    * Creates a new CopcStreamingLoader instance.
    *
-   * @param url - URL to the COPC file
+   * @param source - URL string, File object, or ArrayBuffer
    * @param options - Streaming options
    */
-  constructor(url: string, options?: StreamingLoaderOptions) {
-    this._url = url;
+  constructor(source: StreamingSource, options?: StreamingLoaderOptions) {
+    this._originalSource = source;
     this._options = { ...DEFAULT_OPTIONS, ...options };
   }
 
@@ -239,21 +259,35 @@ export class CopcStreamingLoader {
     // Initialize LazPerf for decompression
     this._lazPerf = await getLazPerf();
 
-    // Parse COPC header and metadata
-    try {
-      this._copc = await Copc.create(this._url);
-    } catch (error) {
-      // Check if this is likely a CORS error
-      if (error instanceof TypeError && error.message === 'Failed to fetch') {
-        throw new Error(
-          `Failed to fetch from URL. This is likely a CORS (Cross-Origin Resource Sharing) error. ` +
-          `The server at "${new URL(this._url).hostname}" doesn't allow requests from this origin. ` +
-          `Solutions: (1) Download the file locally and load it as a file, ` +
-          `(2) Use a CORS proxy, or (3) Host the file on a CORS-enabled server.`
-        );
+    // Setup source - URL string or Getter for local files
+    if (typeof this._originalSource === 'string') {
+      // URL source
+      this._source = this._originalSource;
+      try {
+        this._copc = await Copc.create(this._source);
+      } catch (error) {
+        // Check if this is likely a CORS error
+        if (error instanceof TypeError && error.message === 'Failed to fetch') {
+          throw new Error(
+            `Failed to fetch from URL. This is likely a CORS (Cross-Origin Resource Sharing) error. ` +
+            `The server at "${new URL(this._source).hostname}" doesn't allow requests from this origin. ` +
+            `Solutions: (1) Download the file locally and load it as a file, ` +
+            `(2) Use a CORS proxy, or (3) Host the file on a CORS-enabled server.`
+          );
+        }
+        throw error;
       }
-      throw error;
+    } else if (this._originalSource instanceof File) {
+      // File source - read into buffer first
+      const buffer = await this._originalSource.arrayBuffer();
+      this._source = createBufferGetter(buffer);
+      this._copc = await Copc.create(this._source);
+    } else {
+      // ArrayBuffer source
+      this._source = createBufferGetter(this._originalSource);
+      this._copc = await Copc.create(this._source);
     }
+
     const { header, info } = this._copc;
 
     // Store root hierarchy page for later traversal
@@ -413,6 +447,7 @@ export class CopcStreamingLoader {
 
   /**
    * Checks if a node's bounds intersect the viewport.
+   * Adds a buffer around viewport to catch edge/corner nodes.
    *
    * @param nodeBounds - Node bounds in WGS84
    * @param viewport - Current viewport info
@@ -424,11 +459,25 @@ export class CopcStreamingLoader {
   ): boolean {
     const [west, south, east, north] = viewport.bounds;
 
+    // Add 20% buffer around viewport to catch edge/corner nodes
+    // This helps with:
+    // 1. Tilted views where getBounds() underestimates visible area
+    // 2. Nodes at the edge that might be partially visible
+    const width = east - west;
+    const height = north - south;
+    const bufferX = width * 0.2;
+    const bufferY = height * 0.2;
+
+    const bufferedWest = west - bufferX;
+    const bufferedEast = east + bufferX;
+    const bufferedSouth = south - bufferY;
+    const bufferedNorth = north + bufferY;
+
     return !(
-      nodeBounds.maxX < west ||
-      nodeBounds.minX > east ||
-      nodeBounds.maxY < south ||
-      nodeBounds.minY > north
+      nodeBounds.maxX < bufferedWest ||
+      nodeBounds.minX > bufferedEast ||
+      nodeBounds.maxY < bufferedSouth ||
+      nodeBounds.minY > bufferedNorth
     );
   }
 
@@ -475,7 +524,7 @@ export class CopcStreamingLoader {
    * @param page - Hierarchy page to load
    */
   private async _loadHierarchyRecursive(page: Hierarchy.Page): Promise<void> {
-    const subtree = await Hierarchy.load(this._url, page);
+    const subtree = await Hierarchy.load(this._source!, page);
 
     // Store all nodes from this page
     for (const [key, node] of Object.entries(subtree.nodes)) {
@@ -510,6 +559,8 @@ export class CopcStreamingLoader {
   /**
    * Finds nodes that intersect the viewport and should be loaded.
    * Implements center-first priority and LOD selection.
+   * Loads nodes at ALL depths up to targetDepth to ensure full coverage
+   * (parent nodes fill gaps where child nodes don't exist in sparse octrees).
    *
    * @param viewport - Current viewport information
    * @returns Sorted array of nodes to load (by priority)
@@ -525,11 +576,12 @@ export class CopcStreamingLoader {
     const nodesToLoad: CachedNode[] = [];
     const targetDepth = viewport.targetDepth;
 
-    // Traverse all cached nodes and select appropriate ones
+    // Load ALL nodes that intersect viewport, from depth 0 up to targetDepth + 1
+    // This ensures parent nodes provide coverage where child nodes don't exist
     for (const [, node] of this._nodeCache) {
       const depth = node.keyArray[0];
 
-      // Only consider nodes at or near target depth
+      // Skip nodes deeper than we need
       if (depth > targetDepth + 1) continue;
 
       // Check viewport intersection
@@ -537,16 +589,18 @@ export class CopcStreamingLoader {
         continue;
       }
 
-      // If at target depth, add to load list
-      if (depth === targetDepth || depth === targetDepth + 1) {
-        if (node.state !== 'loaded' && node.state !== 'loading') {
-          node.priority = this._calculateNodePriority(node.boundsWgs84, viewport);
-          nodesToLoad.push(node);
-        }
+      // Add to load list if not already loaded/loading
+      if (node.state !== 'loaded' && node.state !== 'loading') {
+        // Calculate priority: distance from center, with depth bonus
+        // Deeper nodes (more detail) get slightly higher priority
+        const distPriority = this._calculateNodePriority(node.boundsWgs84, viewport);
+        // Normalize depth bonus: deeper = lower priority number = higher priority
+        node.priority = distPriority - (depth * 0.0001);
+        nodesToLoad.push(node);
       }
     }
 
-    // Sort by distance from viewport center (center-first priority)
+    // Sort by priority (center-first, deeper nodes slightly preferred)
     nodesToLoad.sort((a, b) => (a.priority || Infinity) - (b.priority || Infinity));
 
     return nodesToLoad;
@@ -602,6 +656,12 @@ export class CopcStreamingLoader {
     node.state = 'loading';
     this._activeRequests++;
 
+    // IMPORTANT: Reserve buffer space BEFORE async operations to prevent race conditions
+    // When multiple nodes load concurrently, each must have its own unique buffer region
+    const startIndex = this._totalLoadedPoints;
+    node.bufferStartIndex = startIndex;
+    this._totalLoadedPoints += node.pointCount; // Reserve space immediately
+
     try {
       const hierarchyNode: Hierarchy.Node = {
         pointCount: node.pointCount,
@@ -610,7 +670,7 @@ export class CopcStreamingLoader {
       };
 
       const view = await Copc.loadPointDataView(
-        this._url,
+        this._source!,
         this._copc!,
         hierarchyNode,
         { lazPerf: this._lazPerf! }
@@ -632,14 +692,10 @@ export class CopcStreamingLoader {
         this._dimensionsDetected = true;
       }
 
-      // Extract point data into buffers
-      const startIndex = this._totalLoadedPoints;
-      node.bufferStartIndex = startIndex;
-
+      // Extract point data into buffers (using pre-reserved startIndex)
       await this._extractPointData(view, node, startIndex);
 
       node.state = 'loaded';
-      this._totalLoadedPoints += node.pointCount;
       this._totalLoadedNodes++;
 
       this._emit('nodeloaded', node);
@@ -650,6 +706,7 @@ export class CopcStreamingLoader {
     } catch (error) {
       node.state = 'error';
       node.error = error instanceof Error ? error.message : String(error);
+      console.warn(`Failed to load node ${node.key}:`, error);
       this._emit('error', error as Error);
     } finally {
       this._activeRequests--;
