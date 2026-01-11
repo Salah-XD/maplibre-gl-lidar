@@ -18,6 +18,7 @@ import { PointCloudManager } from '../layers/PointCloudManager';
 import { ViewportManager } from './ViewportManager';
 import { PanelBuilder } from '../gui/PanelBuilder';
 import { generateId, getFilename } from '../utils/helpers';
+import { getAvailableClassifications } from '../colorizers/ColorScheme';
 
 /**
  * Default options for the LidarControl
@@ -112,6 +113,8 @@ export class LidarControl implements IControl {
       pickInfoFields: this._options.pickInfoFields,
       zOffsetEnabled: this._options.zOffsetEnabled ?? false,
       zOffset: this._options.zOffset ?? 0,
+      hiddenClassifications: new Set(),
+      availableClassifications: new Set(),
     };
     this._loader = new PointCloudLoader();
   }
@@ -380,12 +383,20 @@ export class LidarControl implements IControl {
         wkt: data.wkt,
       };
 
+      // Extract available classifications and merge with existing
+      const newClassifications = getAvailableClassifications(data);
+      const mergedClassifications = new Set([
+        ...this._state.availableClassifications,
+        ...newClassifications,
+      ]);
+
       // Update state
       const pointClouds = [...this._state.pointClouds, info];
       this.setState({
         loading: false,
         pointClouds,
         activePointCloudId: id,
+        availableClassifications: mergedClassifications,
       });
 
       // Emit load event
@@ -445,19 +456,31 @@ export class LidarControl implements IControl {
 
       this._pointCloudManager?.removePointCloud(id);
       const pointClouds = this._state.pointClouds.filter((pc) => pc.id !== id);
-      this.setState({
+
+      // Reset classification state when removing datasets
+      // (classifications will be re-extracted when new data is loaded)
+      const stateUpdate: Partial<LidarState> = {
         pointClouds,
         activePointCloudId:
           this._state.activePointCloudId === id
             ? pointClouds[0]?.id || null
             : this._state.activePointCloudId,
-      });
+        availableClassifications: new Set(),
+        hiddenClassifications: new Set(),
+      };
+
+      this.setState(stateUpdate);
       this._emit('unload');
     } else {
       // Unload all including streaming
       this.stopStreaming();
       this._pointCloudManager?.clear();
-      this.setState({ pointClouds: [], activePointCloudId: null });
+      this.setState({
+        pointClouds: [],
+        activePointCloudId: null,
+        availableClassifications: new Set(),
+        hiddenClassifications: new Set(),
+      });
       this._emit('unload');
     }
   }
@@ -513,6 +536,19 @@ export class LidarControl implements IControl {
       // Setup callback for when points are loaded
       streamingLoader.setOnPointsLoaded((data) => {
         this._pointCloudManager?.updatePointCloud(id, data);
+
+        // Extract and merge classifications from streamed data
+        const newClassifications = getAvailableClassifications(data);
+        if (newClassifications.size > 0) {
+          const mergedClassifications = new Set([
+            ...this._state.availableClassifications,
+            ...newClassifications,
+          ]);
+          // Only update if we have new classifications
+          if (mergedClassifications.size > this._state.availableClassifications.size) {
+            this.setState({ availableClassifications: mergedClassifications });
+          }
+        }
       });
 
       // Setup event handlers
@@ -745,12 +781,20 @@ export class LidarControl implements IControl {
         wkt: data.wkt,
       };
 
+      // Extract available classifications and merge with existing
+      const newClassifications = getAvailableClassifications(data);
+      const mergedClassifications = new Set([
+        ...this._state.availableClassifications,
+        ...newClassifications,
+      ]);
+
       // Update state
       const pointClouds = [...this._state.pointClouds, info];
       this.setState({
         loading: false,
         pointClouds,
         activePointCloudId: id,
+        availableClassifications: mergedClassifications,
       });
 
       this._emitWithData('load', { pointCloud: info });
@@ -847,6 +891,7 @@ export class LidarControl implements IControl {
       const pointClouds = this._state.pointClouds.filter((pc) => pc.id !== id);
       const hasActiveStreaming = this._streamingLoaders.size > 0;
 
+      // Reset classification state when removing datasets
       this.setState({
         pointClouds,
         activePointCloudId:
@@ -855,6 +900,8 @@ export class LidarControl implements IControl {
             : this._state.activePointCloudId,
         streamingActive: hasActiveStreaming,
         streamingProgress: hasActiveStreaming ? this._state.streamingProgress : undefined,
+        availableClassifications: new Set(),
+        hiddenClassifications: new Set(),
       });
 
       this._emit('streamingstop');
@@ -885,6 +932,7 @@ export class LidarControl implements IControl {
         (pc) => !streamingIds.includes(pc.id)
       );
 
+      // Reset classification state when removing datasets
       this.setState({
         pointClouds,
         activePointCloudId:
@@ -893,6 +941,8 @@ export class LidarControl implements IControl {
             : this._state.activePointCloudId,
         streamingActive: false,
         streamingProgress: undefined,
+        availableClassifications: new Set(),
+        hiddenClassifications: new Set(),
       });
 
       if (streamingIds.length > 0) {
@@ -1221,6 +1271,9 @@ export class LidarControl implements IControl {
         onZOffsetChange: (offset) => this.setZOffset(offset),
         onUnload: (id) => this.unloadPointCloud(id),
         onZoomTo: (id) => this.flyToPointCloud(id),
+        onClassificationToggle: (code, visible) => this._toggleClassification(code, visible),
+        onClassificationShowAll: () => this._showAllClassifications(),
+        onClassificationHideAll: () => this._hideAllClassifications(),
       },
       this._state
     );
@@ -1431,5 +1484,87 @@ export class LidarControl implements IControl {
    */
   getPickInfoFields(): string[] | undefined {
     return this._state.pickInfoFields;
+  }
+
+  // ==================== Classification Visibility API ====================
+
+  /**
+   * Toggles visibility of a specific classification.
+   *
+   * @param code - Classification code to toggle
+   * @param visible - Whether to show the classification
+   */
+  private _toggleClassification(code: number, visible: boolean): void {
+    const newHidden = new Set(this._state.hiddenClassifications);
+    if (visible) {
+      newHidden.delete(code);
+    } else {
+      newHidden.add(code);
+    }
+    this._pointCloudManager?.setHiddenClassifications(newHidden);
+    this.setState({ hiddenClassifications: newHidden });
+    this._emit('stylechange');
+  }
+
+  /**
+   * Shows all classifications.
+   */
+  private _showAllClassifications(): void {
+    const newHidden = new Set<number>();
+    this._pointCloudManager?.setHiddenClassifications(newHidden);
+    this.setState({ hiddenClassifications: newHidden });
+    this._emit('stylechange');
+  }
+
+  /**
+   * Hides all classifications.
+   */
+  private _hideAllClassifications(): void {
+    const newHidden = new Set(this._state.availableClassifications);
+    this._pointCloudManager?.setHiddenClassifications(newHidden);
+    this.setState({ hiddenClassifications: newHidden });
+    this._emit('stylechange');
+  }
+
+  /**
+   * Sets visibility for a specific classification.
+   *
+   * @param code - Classification code
+   * @param visible - Whether to show the classification
+   */
+  setClassificationVisibility(code: number, visible: boolean): void {
+    this._toggleClassification(code, visible);
+  }
+
+  /**
+   * Gets the set of hidden classification codes.
+   *
+   * @returns Array of hidden classification codes
+   */
+  getHiddenClassifications(): number[] {
+    return Array.from(this._state.hiddenClassifications);
+  }
+
+  /**
+   * Gets the set of available classification codes in the loaded data.
+   *
+   * @returns Array of available classification codes
+   */
+  getAvailableClassifications(): number[] {
+    return Array.from(this._state.availableClassifications);
+  }
+
+  /**
+   * Shows all classifications (makes all visible).
+   */
+  showAllClassifications(): void {
+    this._showAllClassifications();
+  }
+
+  /**
+   * Hides all classifications.
+   */
+  hideAllClassifications(): void {
+    this._hideAllClassifications();
   }
 }
