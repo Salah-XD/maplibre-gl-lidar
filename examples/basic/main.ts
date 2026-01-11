@@ -26,6 +26,8 @@ map.addControl(new maplibregl.ScaleControl(), 'bottom-right');
 // Add LiDAR control when map loads
 map.on('load', () => {
   // Create the LiDAR control with options
+  // COPC files from URLs automatically use dynamic streaming mode
+  // Non-COPC files or local files use full download mode
   const lidarControl = new LidarControl({
     title: 'LiDAR Viewer',
     collapsed: true, // Start with just the 29x29 button visible
@@ -33,6 +35,8 @@ map.on('load', () => {
     pointSize: 2,
     opacity: 1.0,
     colorScheme: 'elevation',
+    // copcLoadingMode: 'dynamic',  // Auto-detected for COPC URLs, use 'full' to force download
+    // streamingPointBudget: 5_000_000  // Max points in memory for streaming mode
     // panelMaxHeight: 600,
   });
 
@@ -74,11 +78,35 @@ map.on('load', () => {
   // console.log('LiDAR control added to map');
   // console.log('Open the control panel and load a LAS/LAZ file to visualize point cloud data.');
 
-  // Example: Load a point cloud programmatically (uncomment to use)
+  // Example: Load a local file (full download)
   // lidarControl.loadPointCloud('/data/autzen-classified.copc.laz')
   //   .then((info) => {
   //     console.log('Loaded programmatically:', info);
   //     lidarControl.flyToPointCloud();
   //   })
   //   .catch((err) => console.error('Failed to load:', err));
+
+  // Example: Load COPC from URL - automatically uses dynamic streaming mode
+  // Points are loaded on-demand based on viewport and zoom level
+  // lidarControl.loadPointCloud('https://s3.amazonaws.com/hobu-lidar/autzen-classified.copc.laz');
+
+  // To force full download for COPC URL (not recommended for large files):
+  // lidarControl.loadPointCloud('https://example.com/large-pointcloud.copc.laz', {
+  //   loadingMode: 'full'
+  // });
+
+  // Or use direct streaming method with custom options:
+  // lidarControl.loadPointCloudStreaming('https://s3.amazonaws.com/hobu-lidar/autzen-classified.copc.laz', {
+  //   pointBudget: 5_000_000,       // Max points in memory (default: 5M)
+  //   maxConcurrentRequests: 4,     // Parallel HTTP requests (default: 4)
+  //   viewportDebounceMs: 150       // Debounce viewport changes (default: 150ms)
+  // });
+
+  // Listen for streaming events
+  // lidarControl.on('streamingprogress', (event) => {
+  //   console.log('Streaming progress:', event.state.streamingProgress);
+  // });
+  // lidarControl.on('budgetreached', () => {
+  //   console.log('Point budget reached');
+  // });
 });
