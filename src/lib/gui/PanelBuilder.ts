@@ -19,6 +19,7 @@ export interface PanelBuilderCallbacks {
   onPickableChange: (pickable: boolean) => void;
   onZOffsetEnabledChange: (enabled: boolean) => void;
   onZOffsetChange: (offset: number) => void;
+  onTerrainChange: (enabled: boolean) => void;
   onUnload: (id: string) => void;
   onZoomTo: (id: string) => void;
   onClassificationToggle: (classificationCode: number, visible: boolean) => void;
@@ -50,6 +51,7 @@ export class PanelBuilder {
   private _zOffsetCheckbox?: HTMLInputElement;
   private _zOffsetSlider?: RangeSlider;
   private _zOffsetSliderContainer?: HTMLElement;
+  private _terrainCheckbox?: HTMLInputElement;
   private _loadingIndicator?: HTMLElement;
   private _errorMessage?: HTMLElement;
   private _classificationLegend?: ClassificationLegend;
@@ -169,6 +171,11 @@ export class PanelBuilder {
       this._zOffsetSlider.setValue(state.zOffset ?? 0);
     }
 
+    // Update terrain checkbox
+    if (this._terrainCheckbox) {
+      this._terrainCheckbox.checked = state.terrainEnabled ?? false;
+    }
+
     // Update elevation slider bounds when point clouds change
     if (this._elevationSlider && state.pointClouds.length > 0) {
       const bounds = this._getElevationBounds();
@@ -236,7 +243,7 @@ export class PanelBuilder {
 
     const urlLabel = document.createElement('label');
     urlLabel.className = 'lidar-control-label';
-    urlLabel.textContent = 'Or load from URL';
+    urlLabel.textContent = 'Load COPC or EPT from URL';
     urlGroup.appendChild(urlLabel);
 
     const urlRow = document.createElement('div');
@@ -344,6 +351,9 @@ export class PanelBuilder {
       onChange: (v) => this._callbacks.onOpacityChange(v),
     });
     section.appendChild(this._opacitySlider.render());
+
+    // 3D Terrain toggle
+    section.appendChild(this._buildTerrainCheckbox());
 
     // Pickable checkbox
     section.appendChild(this._buildPickableCheckbox());
@@ -499,6 +509,42 @@ export class PanelBuilder {
         this._zOffsetSlider?.setValue(0);
         this._callbacks.onZOffsetChange(0);
       }
+    });
+
+    return group;
+  }
+
+  /**
+   * Builds the 3D terrain toggle checkbox.
+   */
+  private _buildTerrainCheckbox(): HTMLElement {
+    const group = document.createElement('div');
+    group.className = 'lidar-control-group';
+
+    const labelRow = document.createElement('div');
+    labelRow.className = 'lidar-control-label-row';
+    labelRow.style.cursor = 'pointer';
+
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.id = 'lidar-terrain-checkbox';
+    checkbox.checked = this._state.terrainEnabled ?? false;
+    checkbox.style.marginRight = '6px';
+    this._terrainCheckbox = checkbox;
+
+    const label = document.createElement('label');
+    label.className = 'lidar-control-label';
+    label.htmlFor = 'lidar-terrain-checkbox';
+    label.style.display = 'inline';
+    label.style.cursor = 'pointer';
+    label.textContent = '3D Terrain';
+
+    labelRow.appendChild(checkbox);
+    labelRow.appendChild(label);
+    group.appendChild(labelRow);
+
+    checkbox.addEventListener('change', () => {
+      this._callbacks.onTerrainChange(checkbox.checked);
     });
 
     return group;
