@@ -3,7 +3,7 @@ import { COORDINATE_SYSTEM } from '@deck.gl/core';
 import type { PickingInfo } from '@deck.gl/core';
 import type { DeckOverlay } from '../core/DeckOverlay';
 import type { PointCloudData } from '../loaders/types';
-import type { ColorScheme, PointCloudBounds } from '../core/types';
+import type { ColorScheme, PointCloudBounds, ColormapName, ColorRangeConfig } from '../core/types';
 import type { PointCloudLayerOptions, PickedPointInfo } from './types';
 import { ColorSchemeProcessor } from '../colorizers/ColorScheme';
 
@@ -29,6 +29,7 @@ export class PointCloudManager {
   private _pointClouds: Map<string, ManagedPointCloud>;
   private _options: PointCloudLayerOptions;
   private _colorProcessor: ColorSchemeProcessor;
+  private _lastComputedBounds?: { min: number; max: number };
 
   constructor(deckOverlay: DeckOverlay, options: Partial<PointCloudLayerOptions> = {}) {
     this._deckOverlay = deckOverlay;
@@ -39,6 +40,8 @@ export class PointCloudManager {
       opacity: options.opacity ?? 1.0,
       colorScheme: options.colorScheme ?? 'elevation',
       usePercentile: options.usePercentile ?? true,
+      colormap: options.colormap ?? 'viridis',
+      colorRange: options.colorRange,
       elevationRange: options.elevationRange ?? null,
       pickable: options.pickable ?? false,
       zOffset: options.zOffset ?? 0,
@@ -62,10 +65,17 @@ export class PointCloudManager {
    * @param data - Point cloud data (positions are already offsets from coordinateOrigin)
    */
   addPointCloud(id: string, data: PointCloudData): void {
-    const colors = this._colorProcessor.getColors(data, this._options.colorScheme, {
+    const result = this._colorProcessor.getColorsWithBounds(data, this._options.colorScheme, {
       usePercentile: this._options.usePercentile,
+      colormap: this._options.colormap,
+      colorRange: this._options.colorRange,
       hiddenClassifications: this._options.hiddenClassifications,
     });
+
+    // Store the computed bounds for colorbar display
+    if (result.bounds) {
+      this._lastComputedBounds = result.bounds;
+    }
 
     // Use the coordinate origin from the data - positions are already stored as offsets
     const coordinateOrigin = data.coordinateOrigin;
@@ -73,7 +83,7 @@ export class PointCloudManager {
     this._pointClouds.set(id, {
       id,
       data,
-      colors,
+      colors: result.colors,
       coordinateOrigin,
       visible: true,
       opacityOverride: null,
@@ -98,15 +108,22 @@ export class PointCloudManager {
 
     if (existing) {
       // Recalculate colors for new data
-      const colors = this._colorProcessor.getColors(data, this._options.colorScheme, {
+      const result = this._colorProcessor.getColorsWithBounds(data, this._options.colorScheme, {
         usePercentile: this._options.usePercentile,
+        colormap: this._options.colormap,
+        colorRange: this._options.colorRange,
         hiddenClassifications: this._options.hiddenClassifications,
       });
+
+      // Store the computed bounds for colorbar display
+      if (result.bounds) {
+        this._lastComputedBounds = result.bounds;
+      }
 
       this._pointClouds.set(id, {
         id,
         data,
-        colors,
+        colors: result.colors,
         coordinateOrigin: data.coordinateOrigin,
         visible: existing.visible,
         opacityOverride: existing.opacityOverride,
@@ -187,20 +204,31 @@ export class PointCloudManager {
       options.colorScheme !== this._options.colorScheme;
     const percentileChanged = options.usePercentile !== undefined &&
       options.usePercentile !== this._options.usePercentile;
+    const colormapChanged = options.colormap !== undefined &&
+      options.colormap !== this._options.colormap;
+    const colorRangeChanged = options.colorRange !== undefined;
     const hiddenClassificationsChanged = options.hiddenClassifications !== undefined;
 
     this._options = { ...this._options, ...options };
 
-    // If color scheme, percentile setting, or hidden classifications changed, recompute colors
-    if (colorSchemeChanged || percentileChanged || hiddenClassificationsChanged) {
+    // If color-related settings changed, recompute colors
+    if (colorSchemeChanged || percentileChanged || colormapChanged || colorRangeChanged || hiddenClassificationsChanged) {
       for (const [id, pc] of this._pointClouds) {
-        const colors = this._colorProcessor.getColors(pc.data, this._options.colorScheme, {
+        const result = this._colorProcessor.getColorsWithBounds(pc.data, this._options.colorScheme, {
           usePercentile: this._options.usePercentile,
+          colormap: this._options.colormap,
+          colorRange: this._options.colorRange,
           hiddenClassifications: this._options.hiddenClassifications,
         });
+
+        // Store the computed bounds for colorbar display
+        if (result.bounds) {
+          this._lastComputedBounds = result.bounds;
+        }
+
         this._pointClouds.set(id, {
           ...pc,
-          colors,
+          colors: result.colors,
           coordinateOrigin: pc.coordinateOrigin,
           visible: pc.visible,
           opacityOverride: pc.opacityOverride,
@@ -253,6 +281,24 @@ export class PointCloudManager {
    */
   setUsePercentile(usePercentile: boolean): void {
     this.updateStyle({ usePercentile });
+  }
+
+  /**
+   * Sets the colormap for elevation/intensity coloring.
+   *
+   * @param colormap - Colormap name
+   */
+  setColormap(colormap: ColormapName): void {
+    this.updateStyle({ colormap });
+  }
+
+  /**
+   * Sets the color range configuration.
+   *
+   * @param colorRange - Color range configuration
+   */
+  setColorRange(colorRange: ColorRangeConfig): void {
+    this.updateStyle({ colorRange });
   }
 
   /**
@@ -361,6 +407,14 @@ export class PointCloudManager {
    */
   getOptions(): PointCloudLayerOptions {
     return { ...this._options };
+  }
+
+  /**
+   * Gets the last computed color bounds.
+   * Used for displaying accurate colorbar min/max values.
+   */
+  getLastComputedBounds(): { min: number; max: number } | undefined {
+    return this._lastComputedBounds;
   }
 
   /**
