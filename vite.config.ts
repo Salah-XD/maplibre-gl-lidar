@@ -8,9 +8,9 @@ import replace from '@rollup/plugin-replace';
 // This code is inside ENVIRONMENT_IS_NODE guards and never executes in browsers,
 // but we provide a correct implementation for safety
 const PATH_SHIM = `({
-  dirname: (p) => { const i = p.lastIndexOf('/'); return i === -1 ? '.' : p.substring(0, i) || '/'; },
+  dirname: (p) => { const i = p.lastIndexOf('/'); return i <= 0 ? (i === 0 ? '/' : '.') : p.substring(0, i); },
   normalize: (p) => p,
-  join: (...a) => a.join('/')
+  join: (...a) => a.filter(Boolean).join('/').replace(/\\/+/g, '/')
 })`;
 
 export default defineConfig({
