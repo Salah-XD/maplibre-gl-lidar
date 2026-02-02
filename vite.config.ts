@@ -2,6 +2,7 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { resolve } from 'path';
 import dts from 'vite-plugin-dts';
+import replace from '@rollup/plugin-replace';
 
 export default defineConfig({
   plugins: [
@@ -34,6 +35,21 @@ export default defineConfig({
       },
     },
     rollupOptions: {
+      plugins: [
+        // Replace require("fs") and require("path") with browser-safe shims
+        // These are in @loaders.gl/las Emscripten code inside ENVIRONMENT_IS_NODE guards
+        // (never executed in browsers, but static analyzers still try to resolve them)
+        replace({
+          preventAssignment: true,
+          delimiters: ['', ''],
+          values: {
+            'require("fs")': '{}',
+            "require('fs')": '{}',
+            'require("path")': '({ dirname: (p) => p, normalize: (p) => p, join: (...a) => a.join("/") })',
+            "require('path')": '({ dirname: (p) => p, normalize: (p) => p, join: (...a) => a.join("/") })',
+          },
+        }),
+      ],
       external: [
         'react',
         'react-dom',
