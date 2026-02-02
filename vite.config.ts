@@ -4,6 +4,15 @@ import { resolve } from 'path';
 import dts from 'vite-plugin-dts';
 import replace from '@rollup/plugin-replace';
 
+// Browser-safe shim for Node.js 'path' module (used by @rollup/plugin-replace)
+// This code is inside ENVIRONMENT_IS_NODE guards and never executes in browsers,
+// but we provide a correct implementation for safety
+const PATH_SHIM = `({
+  dirname: (p) => { const i = p.lastIndexOf('/'); return i === -1 ? '.' : p.substring(0, i) || '/'; },
+  normalize: (p) => p,
+  join: (...a) => a.join('/')
+})`;
+
 export default defineConfig({
   plugins: [
     react(),
@@ -45,8 +54,8 @@ export default defineConfig({
           values: {
             'require("fs")': '{}',
             "require('fs')": '{}',
-            'require("path")': '({ dirname: (p) => p, normalize: (p) => p, join: (...a) => a.join("/") })',
-            "require('path')": '({ dirname: (p) => p, normalize: (p) => p, join: (...a) => a.join("/") })',
+            'require("path")': PATH_SHIM,
+            "require('path')": PATH_SHIM,
           },
         }),
       ],
